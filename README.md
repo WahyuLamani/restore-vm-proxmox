@@ -1,6 +1,6 @@
-# SOP Proxmox Backup, NAS OMV, dan Disaster Recovery (DR)
+# Prosedur Proxmox Backup, NAS OMV, dan Disaster Recovery (DR)
 
-**Dokumen:** SOP Implementasi Backup & DR Proxmox  
+**Dokumen:** Prosedur Implementasi Backup & DR Proxmox  
 **Versi:** 1.0  
 **Status:** Implementasi Produksi  
 **Tujuan:** Menyediakan prosedur backup VM Proxmox secara otomatis ke NAS OMV serta melakukan restore otomatis ke Proxmox DR dengan mekanisme health check, rollback, dan rotasi 2 slot.
@@ -9,7 +9,7 @@
 
 ## 1. Tujuan
 
-SOP ini digunakan untuk memastikan:
+Prosedur ini digunakan untuk memastikan:
 
 1. VM produksi di Proxmox utama dibackup secara terjadwal.
 2. File backup disalin ke NAS OMV setelah backup lokal selesai.
@@ -93,23 +93,23 @@ NETWORK + SSH + HTTP CHECK
 
 # 3. Komponen Infrastruktur
 
-| Komponen | Nilai |
-|---|---|
-| Proxmox Production | `192.168.71.202` |
-| Proxmox DR | `192.168.71.205` |
-| NAS OMV | `192.168.71.211` |
-| NFS Export | `/export/Backup_VM` |
-| Mount NFS di DR | `/mnt/omv-backup` |
-| Folder backup | `/Regional` |
-| Production VMID | `107` |
-| Nama VM | `ONEMDORAYA` |
-| IP VM | `192.168.71.233` |
-| DR Slot A | `117` |
-| DR Slot B | `118` |
-| DR Bridge | `vmbr-dr` |
+| Komponen                | Nilai               |
+| ----------------------- | ------------------- |
+| Proxmox Production      | `192.168.71.202`    |
+| Proxmox DR              | `192.168.71.205`    |
+| NAS OMV                 | `192.168.71.211`    |
+| NFS Export              | `/export/Backup_VM` |
+| Mount NFS di DR         | `/mnt/omv-backup`   |
+| Folder backup           | `/Regional`         |
+| Production VMID         | `107`               |
+| Nama VM                 | `ONEMDORAYA`        |
+| IP VM                   | `192.168.71.233`    |
+| DR Slot A               | `117`               |
+| DR Slot B               | `118`               |
+| DR Bridge               | `vmbr-dr`           |
 | DR IP management bridge | `192.168.71.253/32` |
-| DR Storage | `local-lvm` |
-| Retention NAS | `2` folder backup |
+| DR Storage              | `local-lvm`         |
+| Retention NAS           | `2` folder backup   |
 
 ---
 
@@ -818,7 +818,7 @@ Beberapa prinsip yang harus dipertahankan:
 
 ---
 
-# 22. Ringkasan SOP
+# 22. Ringkasan Prosedur
 
 ```text
 PROXMOX A
@@ -899,4 +899,4 @@ Rollback           : Otomatis
 Promote            : Otomatis
 ```
 
-Dokumen ini merupakan **SOP operasional dan implementasi**. Detail konfigurasi serta kode `.sh` dipisahkan dari dokumen agar SOP dapat dibagikan dan digunakan sebagai panduan tanpa membawa source code server.
+Dokumen ini merupakan **Prosedur operasional dan implementasi**. Detail konfigurasi serta kode `.sh` dipisahkan dari dokumen agar Prosedur dapat dibagikan dan digunakan sebagai panduan tanpa membawa source code server.
