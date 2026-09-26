@@ -1,535 +1,459 @@
-# SOP Implementasi Proxmox Backup → NAS OMV → Proxmox DR
+# README — Standar Implementasi Restore Disaster Recovery Proxmox
 
-**Versi:** 1.0  
-**Jenis:** SOP Implementasi Teknis  
-**Tujuan:** Panduan implementasi dari kondisi server kosong sampai sistem backup dan Disaster Recovery (DR) berjalan otomatis.
-
-> **Catatan:** Dokumen ini berisi tata cara implementasi, urutan pekerjaan, konfigurasi, validasi, dan pengujian. Source code/script `.sh` tidak disertakan karena script sudah tersedia di server.
-
----
-
-# 1. Arsitektur yang Digunakan
-
-```text
-                    PRODUCTION
-                 Proxmox A
-              192.168.71.202
-                     |
-                     | Backup VM
-                     v
-               Local Storage
-                     |
-                     | rsync + verify
-                     v
-                  NAS OMV
-              192.168.71.211
-              /export/Backup_VM
-                     |
-                     | NFS
-                     v
-                  Proxmox B
-              192.168.71.205
-                     |
-             +-------+-------+
-             |               |
-          Slot 117        Slot 118
-          DR VM           DR VM
-```
-
-VM production:
-
-```text
-VMID : 107
-Name : ONEMDORAYA
-IP   : 192.168.71.233
-```
-
-DR slot:
-
-```text
-Slot A : 117
-Slot B : 118
-```
+**Dokumen:** Standar Implementasi Restore / Disaster Recovery  
+**Platform:** Proxmox VE + OpenMediaVault (OMV)  
+**Model:** Restore VM produksi ke Proxmox DR menggunakan backup yang tersimpan di OMV  
+**Status:** Implementasi final / teruji  
+**Versi:** 1.0
 
 ---
 
-# 2. Prasyarat
+## 1. Tujuan
 
-Pastikan sebelum implementasi:
+Dokumen ini menjadi standar implementasi untuk proses **restore VM Proxmox ke server Disaster Recovery (DR)** menggunakan backup yang tersimpan pada OpenMediaVault.
 
-### Proxmox A
+Standar ini mengikuti implementasi yang telah diuji, dengan prinsip:
 
-- VM production sudah tersedia.
-- `vzdump` dapat membuat backup.
-- Storage `local` tersedia.
-- NAS dapat diakses melalui network.
-- Root access tersedia.
+- Proxmox DR mengambil backup langsung dari OMV melalui NFS.
+- Tidak perlu menyalin file backup secara manual ke `/var/lib/vz/dump`.
+- VM hasil restore menggunakan **IP produksi yang sama**.
+- VM hasil restore ditempatkan terlebih dahulu pada jaringan **isolasi DR**.
+- Akses administrasi dan health check tetap dapat dilakukan tanpa mematikan VM produksi.
+- Setelah VM tervalidasi, VM dapat dipromosikan menjadi VM aktif saat diperlukan.
+- Proses restore dapat digunakan untuk **uji DR** maupun **actual failover**.
 
-### NAS OMV
+> **Catatan:** Dokumen ini hanya membahas implementasi restore/DR. Proses pembuatan backup dan script backup tidak dibahas di dalam dokumen ini.
 
-- NFS Server aktif.
-- Export tersedia:
+---
 
-```text
-/export/Backup_VM
-```
-
-- Proxmox A dapat melakukan write ke NFS.
-- Proxmox B dapat melakukan read ke NFS.
-
-### Proxmox B
-
-- Proxmox sudah terinstall.
-- Storage restore tersedia, misalnya:
+## 2. Arsitektur Restore
 
 ```text
-local-lvm
+                 PRODUCTION
+              Proxmox A
+           192.168.71.202
+                  |
+                  | Backup
+                  v
+        +----------------------+
+        |   OpenMediaVault     |
+        |   192.168.71.211     |
+        |                      |
+        | /export/Backup_VM    |
+        |      /Regional       |
+        +----------+-----------+
+                   |
+                   | NFS
+                   v
+        +----------------------+
+        |    Proxmox DR / B    |
+        |    192.168.71.205    |
+        |                      |
+        |   local-lvm          |
+        |   vmbr0              |
+        |   vmbr-dr            |
+        +----------+-----------+
+                   |
+                   | Isolated DR VM
+                   v
+            Production IP
+            192.168.71.233
 ```
 
-- Network production dapat digunakan untuk management.
-- Tersedia bridge khusus DR:
+### Prinsip jaringan
+
+VM hasil restore **tidak langsung ditempatkan pada `vmbr0`**.
+
+VM terlebih dahulu menggunakan:
 
 ```text
 vmbr-dr
 ```
 
-- VM production tidak boleh sudah ada pada Proxmox B.
+Dengan demikian VM dapat menggunakan IP produksi:
+
+```text
+192.168.71.233
+```
+
+tanpa langsung berada pada jaringan produksi melalui bridge utama.
 
 ---
 
-# 3. Implementasi NAS OMV
+# 3. Komponen Infrastruktur
 
-## 3.1 Buat NFS Share
+## 3.1 Proxmox Production
 
-Pada OMV buat shared folder:
+| Parameter   | Nilai            |
+| ----------- | ---------------- |
+| Host        | Proxmox A        |
+| IP          | `192.168.71.202` |
+| VM Produksi | `VMID 107`       |
+| Nama VM     | `ONEMDORAYA`     |
+| IP VM       | `192.168.71.233` |
+| Gateway     | `192.168.71.100` |
 
-```text
-Backup_VM
-```
+## 3.2 OpenMediaVault
 
-Kemudian aktifkan NFS share dengan export:
+| Parameter     | Nilai               |
+| ------------- | ------------------- |
+| IP OMV        | `192.168.71.211`    |
+| NFS Export    | `/export/Backup_VM` |
+| Folder backup | `/Regional`         |
 
-```text
-/export/Backup_VM
-```
-
-Izinkan network Proxmox:
-
-```text
-192.168.71.0/24
-```
-
-Pastikan Proxmox dapat mengakses NAS:
-
-```text
-192.168.71.211
-```
-
-Tes dari Proxmox:
-
-```bash
-ping -c 4 192.168.71.211
-```
-
-Expected:
-
-```text
-64 bytes from 192.168.71.211
-```
-
----
-
-# 4. Mount NFS di Proxmox DR
-
-Di Proxmox B install NFS client jika belum tersedia:
-
-```bash
-apt update
-apt install nfs-common -y
-```
-
-Buat mount point:
-
-```bash
-mkdir -p /mnt/omv-backup
-```
-
-Tambahkan ke `/etc/fstab`:
-
-```text
-192.168.71.211:/export/Backup_VM /mnt/omv-backup nfs vers=3,rw,_netdev,x-systemd.automount,noauto 0 0
-```
-
-Jalankan:
-
-```bash
-mount /mnt/omv-backup
-```
-
-Kemudian cek:
-
-```bash
-mount | grep omv-backup
-```
-
-Cek isi:
-
-```bash
-ls -lah /mnt/omv-backup
-```
-
-Pastikan folder:
-
-```text
-Regional
-```
-
-dapat terlihat.
-
----
-
-# 5. Struktur Folder Backup NAS
-
-Buat struktur:
+Struktur backup:
 
 ```text
 /export/Backup_VM/
 └── Regional/
+    └── YYYY-MM-DD/
+        └── backup VM
 ```
-
-Backup nantinya dibuat berdasarkan tanggal:
-
-```text
-Regional/
-├── 2026-09-20/
-│   └── vzdump-qemu-107-....vma.zst
-├── 2026-09-21/
-│   └── vzdump-qemu-107-....vma.zst
-└── 2026-09-22/
-    └── vzdump-qemu-107-....vma.zst
-```
-
-Jangan membuat folder retention secara manual.
-
-Folder tanggal akan dibuat otomatis oleh proses backup.
-
----
-
-# 6. Implementasi Backup Production
-
-## 6.1 Tentukan VM yang Dibackup
-
-Dalam contoh ini:
-
-```text
-VMID = 107
-```
-
-Pastikan VM tersedia:
-
-```bash
-qm status 107
-```
-
-Expected:
-
-```text
-status: running
-```
-
----
-
-# 7. Uji Backup Manual Terlebih Dahulu
-
-Sebelum memasukkan cron, jalankan backup manual:
-
-```bash
-vzdump 107 --compress zstd --mailnotification always --quiet 1 --storage local --mode snapshot
-```
-
-Tunggu sampai selesai.
-
-Kemudian cek:
-
-```bash
-ls -lh /var/lib/vz/dump/
-```
-
-Pastikan terdapat file seperti:
-
-```text
-vzdump-qemu-107-YYYY_MM_DD-HH_MM_SS.vma.zst
-```
-
-Jika backup manual gagal, **jangan lanjut ke tahap otomatisasi**.
-
----
-
-# 8. Implementasi Script Transfer ke NAS
-
-Pastikan script transfer tersedia:
-
-```text
-/usr/local/sbin/backup-to-nas.sh
-```
-
-Permission:
-
-```bash
-chmod 750 /usr/local/sbin/backup-to-nas.sh
-```
-
-Pastikan konfigurasi utamanya:
-
-```text
-VMID          = 107
-NAS_MOUNT     = /mnt/nas-backup
-NAS_BACKUP_DIR= /mnt/nas-backup/Regional
-RETENTION     = 2
-```
-
-> Pada implementasi aktual Proxmox A, NFS/OMV mount yang digunakan oleh script harus sudah tersedia di `/mnt/nas-backup`.
-
-Tes syntax:
-
-```bash
-bash -n /usr/local/sbin/backup-to-nas.sh
-```
-
-Tidak boleh menghasilkan output error.
-
----
-
-# 9. Uji Script Transfer Secara Manual
-
-Ambil salah satu file backup:
-
-```bash
-ls -1t /var/lib/vz/dump/vzdump-qemu-107-*.vma.zst | head -1
-```
-
-Kemudian jalankan:
-
-```bash
-/usr/local/sbin/backup-to-nas.sh /var/lib/vz/dump/NAMA_FILE_BACKUP.vma.zst
-```
-
-Sesuaikan `NAMA_FILE_BACKUP` dengan file aktual.
-
-Setelah selesai:
-
-```bash
-ls -lah /mnt/nas-backup/Regional/
-```
-
-Pastikan folder tanggal terbentuk.
-
-Kemudian:
-
-```bash
-ls -lah /mnt/nas-backup/Regional/YYYY-MM-DD/
-```
-
-Pastikan file backup tersedia.
-
----
-
-# 10. Verifikasi Transfer
-
-Periksa log:
-
-```bash
-tail -50 /var/log/backup-to-nas.log
-```
-
-Pastikan terdapat informasi:
-
-```text
-Verifikasi ukuran: OK
-Backup VM 107 berhasil disalin dan diverifikasi.
-Retention NAS selesai.
-```
-
-Jika ukuran source dan destination berbeda:
-
-```text
-ERROR: Ukuran source dan target berbeda!
-```
-
-maka proses dianggap gagal.
-
----
-
-# 11. Implementasi Retention NAS
-
-Retention menggunakan jumlah folder, bukan jumlah hari.
-
-Konfigurasi:
-
-```text
-RETENTION=2
-```
-
-Contoh sebelum retention:
-
-```text
-Regional/
-├── 2026-09-20/
-├── 2026-09-21/
-└── 2026-09-22/
-```
-
-Setelah retention:
-
-```text
-Regional/
-├── 2026-09-21/
-└── 2026-09-22/
-```
-
-Uji dengan membuat beberapa folder backup atau menjalankan proses backup beberapa kali.
-
-Pastikan:
-
-```text
-Jumlah folder backup <= 2
-```
-
-Backup lokal Proxmox tidak disentuh.
-
----
-
-# 12. Implementasi Vzdump Hook
-
-Buat/letakkan hook:
-
-```text
-/usr/local/sbin/vzdump-hook.sh
-```
-
-Permission:
-
-```bash
-chmod 750 /usr/local/sbin/vzdump-hook.sh
-```
-
-Validasi:
-
-```bash
-bash -n /usr/local/sbin/vzdump-hook.sh
-```
-
-Hook harus bekerja pada phase:
-
-```text
-backup-end
-```
-
-dan hanya memproses:
-
-```text
-VMID 107
-```
-
-Konfigurasi `/etc/vzdump.conf`:
-
-```text
-script: /usr/local/sbin/vzdump-hook.sh
-```
-
----
-
-# 13. Uji Hook Tanpa Menjalankan Backup Besar
-
-Pertama pastikan syntax:
-
-```bash
-bash -n /usr/local/sbin/vzdump-hook.sh
-```
-
-Kemudian cek:
-
-```bash
-grep -n "script:" /etc/vzdump.conf
-```
-
-Expected:
-
-```text
-script: /usr/local/sbin/vzdump-hook.sh
-```
-
-Jangan melakukan perubahan berikutnya sebelum syntax valid.
-
----
-
-# 14. Implementasi Network DR
-
-Pada Proxmox B terdapat dua bridge:
-
-```text
-vmbr0
-vmbr-dr
-```
-
-`vmbr0` digunakan untuk management Proxmox.
 
 Contoh:
 
 ```text
-vmbr0
-IP      : 192.168.71.205/24
-Gateway : 192.168.71.100
+/Regional/
+└── 2026-09-21/
+    └── vzdump-qemu-107-2026_09_21-07_00_02.vma.zst
 ```
 
-`vmbr-dr` digunakan untuk VM DR dan tidak terhubung langsung ke physical NIC:
+## 3.3 Proxmox DR
+
+| Parameter       | Nilai            |
+| --------------- | ---------------- |
+| Host            | Proxmox B / DR   |
+| IP              | `192.168.71.205` |
+| Storage restore | `local-lvm`      |
+| Bridge utama    | `vmbr0`          |
+| Bridge isolasi  | `vmbr-dr`        |
+
+---
+
+# 4. Prasyarat Restore
+
+Sebelum melakukan restore, pastikan:
+
+- Proxmox DR dalam kondisi normal.
+- Storage `local-lvm` tersedia dan memiliki kapasitas yang cukup.
+- Server DR dapat mengakses OMV.
+- NFS backup OMV dapat di-mount pada Proxmox DR.
+- Folder `/Regional` dapat dibaca.
+- File backup VM tersedia dan dapat dibaca.
+- VM produksi masih dapat berjalan apabila pengujian dilakukan tanpa failover.
+- Konfigurasi jaringan `vmbr-dr` tersedia.
+- IP produksi VM yang akan direstore sudah diketahui.
+- VMID target pada Proxmox DR tidak sedang digunakan oleh VM lain.
+- Tidak ada VM DR lain yang menggunakan IP produksi yang sama pada jaringan aktif.
+
+---
+
+# 5. Mount Backup OMV pada Proxmox DR
+
+Backup diakses langsung dari OMV melalui NFS.
+
+Mount point standar:
 
 ```text
-vmbr-dr
-bridge-ports none
+/mnt/omv-backup
 ```
 
-Tambahkan IP management:
+Setelah mount berhasil, lokasi backup harus dapat diakses melalui:
 
 ```text
-192.168.71.253/32
+/mnt/omv-backup/Regional
 ```
 
-Buat route khusus menuju IP VM DR:
+Pastikan folder tanggal dan file backup tersedia, misalnya:
 
 ```text
-192.168.71.233/32 dev vmbr-dr src 192.168.71.253
-```
-
-Setelah konfigurasi, cek:
-
-```bash
-ip route get 192.168.71.233
-```
-
-Expected:
-
-```text
-192.168.71.233 dev vmbr-dr src 192.168.71.253
+/mnt/omv-backup/Regional/2026-09-21/
 ```
 
 ---
 
-# 15. Verifikasi Network DR
+# 6. Pemilihan Backup
 
-Tes:
+Pilih backup berdasarkan kebutuhan restore.
 
-```bash
-ping -I vmbr-dr -c 4 192.168.71.233
+Prioritas pemilihan:
+
+1. Backup terbaru yang tersedia.
+2. Backup merupakan backup VM yang benar.
+3. File backup dapat dibaca dari NFS.
+4. VMID sumber sesuai dengan VM yang akan direstore.
+
+Contoh:
+
+```text
+vzdump-qemu-107-2026_09_21-07_00_02.vma.zst
 ```
 
-Jika VM DR sedang aktif dan terisolasi dengan benar, ping harus dapat mencapai VM DR.
+Informasi penting:
 
-Tes HTTP:
-
-```bash
-curl -I http://192.168.71.233
+```text
+VMID     : 107
+Tanggal  : 2026-09-21
 ```
+
+---
+
+# 7. Restore Langsung dari OMV
+
+Restore dilakukan langsung dari lokasi backup yang telah di-mount.
+
+Alur:
+
+```text
+OMV
+ |
+ | NFS
+ v
+Proxmox DR
+ |
+ | Restore
+ v
+local-lvm
+ |
+ v
+VM baru
+```
+
+Tidak diperlukan proses:
+
+```text
+OMV
+  ↓
+copy backup
+  ↓
+/var/lib/vz/dump
+  ↓
+restore
+```
+
+File backup tetap berada di OMV dan Proxmox DR membaca sumber backup langsung melalui NFS.
+
+---
+
+# 8. Penentuan VMID Restore
+
+VMID hasil restore harus dipastikan tidak sedang digunakan.
+
+Contoh:
+
+```text
+VM produksi       : 107
+VM hasil restore  : 117
+```
+
+Penggunaan VMID baru digunakan untuk proses pengujian restore agar VM production dan VM DR menjadi dua objek VM yang berbeda.
+
+---
+
+# 9. Parameter VM Hasil Restore
+
+Setelah proses restore selesai, periksa konfigurasi VM.
+
+| Parameter   | Standar                      |
+| ----------- | ---------------------------- |
+| Nama VM     | Sama dengan VM produksi      |
+| RAM         | Sesuai kebutuhan VM produksi |
+| CPU         | Sesuai kemampuan node DR     |
+| Storage     | `local-lvm`                  |
+| Disk        | Sesuai ukuran backup         |
+| Network     | `vmbr-dr`                    |
+| IP VM       | IP produksi                  |
+| Gateway     | Gateway produksi             |
+| MAC Address | Dicatat dan diverifikasi     |
+| Boot        | Sesuai kebutuhan DR          |
+
+Pada implementasi yang telah diuji:
+
+```text
+RAM     : 12 GB
+CPU     : 4 vCPU
+Storage : local-lvm
+Bridge  : vmbr-dr
+IP      : 192.168.71.233
+```
+
+Jumlah CPU harus disesuaikan dengan kemampuan node DR. Pada node DR yang diuji, penggunaan lebih dari 4 vCPU untuk VM tersebut tidak diperbolehkan oleh konfigurasi node.
+
+---
+
+# 10. Network Isolation
+
+VM hasil restore tetap menggunakan IP produksi:
+
+```text
+192.168.71.233
+```
+
+Namun network interface VM ditempatkan pada:
+
+```text
+vmbr-dr
+```
+
+bukan:
+
+```text
+vmbr0
+```
+
+Tujuannya mencegah VM hasil restore langsung berkomunikasi dengan jaringan produksi dan menyebabkan konflik IP.
+
+### Kondisi pengujian
+
+```text
+VM Production
+192.168.71.233
+      |
+      +---- jaringan produksi
+
+VM DR
+192.168.71.233
+      |
+      +---- vmbr-dr
+             |
+             +---- isolated
+```
+
+Kedua VM dapat memiliki IP yang sama selama berada pada segmen jaringan yang benar-benar terisolasi.
+
+---
+
+# 11. Akses Administrasi Saat VM Terisolasi
+
+Walaupun VM DR menggunakan IP produksi, administrator tetap perlu melakukan:
+
+- ping
+- SSH
+- HTTP/HTTPS
+- health check
+- pemeriksaan service
+
+Pada implementasi final, akses dilakukan melalui routing khusus pada host Proxmox DR.
+
+Parameter:
+
+```text
+DR Host       : 192.168.71.205
+DR VM         : 192.168.71.233
+DR Source IP  : 192.168.71.253
+Bridge        : vmbr-dr
+```
+
+Route khusus diarahkan ke VM:
+
+```text
+192.168.71.233/32
+```
+
+sehingga traffic menuju IP tersebut dari host DR menggunakan `vmbr-dr`.
+
+Hasil pengujian:
+
+- route menuju `192.168.71.233` menggunakan `vmbr-dr`
+- ping berhasil
+- ARP VM berhasil
+- HTTP menghasilkan `HTTP/1.1 200 OK`
+- SSH berhasil masuk ke server Ubuntu
+- akses administrasi dari PC dapat dilakukan melalui SSH tunnel ke Proxmox DR
+
+---
+
+# 12. Verifikasi Setelah Restore
+
+Jangan langsung melakukan failover setelah restore.
+
+Lakukan health check terlebih dahulu.
+
+## 12.1 Verifikasi VM
+
+Pastikan VM dalam kondisi:
+
+```text
+running
+```
+
+Periksa:
+
+- CPU
+- RAM
+- disk
+- network interface
+- boot configuration
+- hostname
+- IP address
+
+## 12.2 Verifikasi Network
+
+Pastikan route menuju:
+
+```text
+192.168.71.233
+```
+
+menggunakan:
+
+```text
+vmbr-dr
+```
+
+bukan:
+
+```text
+vmbr0
+```
+
+## 12.3 Verifikasi ICMP
+
+Lakukan ping melalui interface DR.
+
+Expected:
+
+```text
+PING 192.168.71.233
+64 bytes from 192.168.71.233
+```
+
+Status:
+
+```text
+PASS
+```
+
+## 12.4 Verifikasi SSH
+
+Lakukan koneksi SSH ke VM hasil restore.
+
+Expected:
+
+```text
+SSH connection successful
+```
+
+Verifikasi login menggunakan user administrasi yang sesuai.
+
+Status:
+
+```text
+PASS
+```
+
+## 12.5 Verifikasi Service
+
+Periksa service utama VM, misalnya:
+
+```text
+Apache / Nginx
+Database
+Application
+API
+```
+
+Untuk aplikasi web, lakukan pemeriksaan HTTP/HTTPS.
 
 Expected:
 
@@ -537,813 +461,389 @@ Expected:
 HTTP/1.1 200 OK
 ```
 
-Tes SSH:
-
-```bash
-ssh regional@192.168.71.233
-```
-
-Pastikan akses menuju VM DR berhasil.
-
----
-
-# 16. Buat Konfigurasi DR
-
-Buat konfigurasi:
+Status:
 
 ```text
-/usr/local/etc/dr/ONEMDORAYA.conf
-```
-
-Parameter utama:
-
-```text
-VM_NAME="ONEMDORAYA"
-
-PROD_VMID="107"
-
-DR_SLOT_A="117"
-DR_SLOT_B="118"
-
-CURRENT_DR_VMID="118"
-
-BACKUP_ROOT="/mnt/omv-backup/Regional"
-
-DR_IP="192.168.71.233"
-DR_BRIDGE="vmbr-dr"
-
-DR_CORES="4"
-DR_MEMORY="12000"
-
-DR_STORAGE="local-lvm"
-
-SSH_PORT="22"
-HTTP_PORT="80"
-```
-
-Pastikan:
-
-```text
-PROD_VMID != DR_SLOT_A
-PROD_VMID != DR_SLOT_B
-DR_SLOT_A != DR_SLOT_B
+PASS
 ```
 
 ---
 
-# 17. Implementasi Helper Script DR
+# 13. Health Check Minimum
 
-Pastikan helper tersedia:
+VM hanya dianggap **READY FOR DR** apabila minimal pemeriksaan berikut berhasil:
 
-```text
-/usr/local/sbin/dr-prepare-vm.sh
-/usr/local/sbin/dr-health-check.sh
-/usr/local/sbin/dr-rollback.sh
-```
+| Pemeriksaan             | Status |
+| ----------------------- | ------ |
+| VM running              | PASS   |
+| Disk terbaca            | PASS   |
+| Network interface aktif | PASS   |
+| IP sesuai               | PASS   |
+| vmbr-dr aktif           | PASS   |
+| Route DR benar          | PASS   |
+| Ping                    | PASS   |
+| SSH                     | PASS   |
+| HTTP/HTTPS              | PASS   |
+| Service aplikasi        | PASS   |
 
-Permission:
-
-```bash
-chmod 750 /usr/local/sbin/dr-prepare-vm.sh
-chmod 750 /usr/local/sbin/dr-health-check.sh
-chmod 750 /usr/local/sbin/dr-rollback.sh
-```
-
-Validasi syntax:
-
-```bash
-bash -n /usr/local/sbin/dr-prepare-vm.sh
-bash -n /usr/local/sbin/dr-health-check.sh
-bash -n /usr/local/sbin/dr-rollback.sh
-```
+Jika salah satu pemeriksaan kritis gagal, VM tidak boleh dipromosikan sebagai VM aktif.
 
 ---
 
-# 18. Implementasi Restore Engine
+# 14. Mode Pengujian DR
 
-Pastikan restore engine tersedia:
-
-```text
-/usr/local/sbin/dr-restore-reusable.sh
-```
-
-Permission:
-
-```bash
-chmod 750 /usr/local/sbin/dr-restore-reusable.sh
-```
-
-Validasi:
-
-```bash
-bash -n /usr/local/sbin/dr-restore-reusable.sh
-```
-
-Restore engine menggunakan pola:
+Pada mode pengujian:
 
 ```text
-CURRENT
-   ↓
-Shutdown
-   ↓
-TARGET
-   ↓
-Restore
-   ↓
-Prepare
-   ↓
-Start
-   ↓
-Health Check
-   ↓
-Promote / Rollback
-```
-
----
-
-# 19. Validasi Sebelum Restore Pertama
-
-Jalankan:
-
-```bash
-/usr/local/sbin/dr-validate.sh ONEMDORAYA
-```
-
-Validasi harus memastikan:
-
-```text
-CURRENT VM      = tersedia
-TARGET VM       = belum ada
-Production VM   = tidak ada di DR
-Backup          = tersedia
-Storage         = tersedia
-Helper script   = tersedia
-CURRENT health  = SUCCESS
-```
-
-Expected:
-
-```text
-SAFETY VALIDATION: PASSED
-```
-
-Jika hasil bukan `PASSED`, hentikan implementasi dan perbaiki masalah terlebih dahulu.
-
----
-
-# 20. Uji Restore Pertama
-
-Setelah validasi berhasil:
-
-```bash
-/usr/local/sbin/dr-restore-reusable.sh ONEMDORAYA
-```
-
-Misalnya:
-
-```text
-CURRENT = 118
-TARGET  = 117
-```
-
-Maka engine akan:
-
-```text
-1. Shutdown 118
-2. Restore backup ke 117
-3. Prepare 117
-4. Start 117
-5. Check network
-6. Check SSH
-7. Check HTTP
-8. Final health check
-9. Promote 117
-10. Delete 118
-```
-
-Jangan melakukan shutdown/delete manual selama proses berlangsung.
-
----
-
-# 21. Verifikasi Setelah Restore
-
-Cek VM:
-
-```bash
-qm list
-```
-
-Expected hanya satu current DR VM yang aktif, misalnya:
-
-```text
-117 running
-```
-
-Pastikan VM production `107` tidak ada:
-
-```bash
-qm status 107
-```
-
-Expected:
-
-```text
-VM 107 not found
-```
-
-Kemudian jalankan:
-
-```bash
-/usr/local/sbin/dr-health-check.sh /usr/local/etc/dr/ONEMDORAYA.conf
-```
-
-Expected:
-
-```text
-HEALTH CHECK: SUCCESS
-```
-
----
-
-# 22. Implementasi SSH Proxmox A → Proxmox B
-
-Pada Proxmox A buat SSH key untuk root jika belum ada:
-
-```bash
-ssh-keygen -t ed25519
-```
-
-Kirim public key ke Proxmox B:
-
-```bash
-ssh-copy-id root@192.168.71.205
-```
-
-Uji:
-
-```bash
-ssh -o BatchMode=yes     -o ConnectTimeout=30     root@192.168.71.205     'echo "DR SSH TEST: OK"; hostname'
-```
-
-Expected:
-
-```text
-DR SSH TEST: OK
-mdoBackupGrd
-```
-
-Tidak boleh meminta password.
-
----
-
-# 23. Implementasi Asynchronous DR Trigger
-
-Hook pada Proxmox A memanggil:
-
-```text
-root@192.168.71.205
-```
-
-dengan restore engine:
-
-```text
-/usr/local/sbin/dr-restore-reusable.sh ONEMDORAYA
-```
-
-Proses harus menggunakan asynchronous execution sehingga Proxmox A tidak menunggu restore selesai.
-
-Konsep:
-
-```text
-Proxmox A
+Production VM
+192.168.71.233
     |
-    | SSH
-    v
-Proxmox B
+    +--- tetap berjalan
+
+DR VM
+192.168.71.233
     |
-    +---- nohup restore engine ----> berjalan di background
-    |
-    +---- SSH selesai
-    |
-Proxmox A selesai
+    +--- vmbr-dr
+         |
+         +--- isolated
 ```
+
+Tujuan mode ini adalah memastikan:
+
+- backup dapat direstore
+- VM dapat boot
+- storage dapat digunakan
+- network VM benar
+- service dapat berjalan
+- administrator dapat melakukan health check
+
+Tanpa mematikan VM produksi.
 
 ---
 
-# 24. Uji Asynchronous Trigger
+# 15. Promosi VM Menjadi VM Aktif
 
-Sebelum menghubungkan restore engine sebenarnya, lakukan test menggunakan proses dummy.
-
-Dari Proxmox A:
-
-```bash
-START=$(date +%s)
-
-ssh -o BatchMode=yes     -o ConnectTimeout=30     root@192.168.71.205     "nohup bash -c 'sleep 30; date > /tmp/dr-async-test-result' >/dev/null 2>&1 </dev/null &"
-
-END=$(date +%s)
-
-echo "SSH elapsed: $((END-START)) seconds"
-```
-
-Expected:
-
-```text
-SSH elapsed: 0
-```
-
-atau sekitar:
-
-```text
-0–2 seconds
-```
-
-Bukan:
-
-```text
-30 seconds
-```
-
-Kemudian:
-
-```bash
-ssh -o BatchMode=yes     root@192.168.71.205     'if [ -f /tmp/dr-async-test-result ]; then echo "TEST FINISHED"; else echo "TEST STILL RUNNING"; fi'
-```
-
-Expected:
-
-```text
-TEST STILL RUNNING
-```
-
-Tunggu sekitar 30 detik kemudian:
-
-```bash
-ssh -o BatchMode=yes     root@192.168.71.205     'cat /tmp/dr-async-test-result'
-```
-
-Jika timestamp muncul, asynchronous execution berhasil.
-
-Cleanup:
-
-```bash
-ssh -o BatchMode=yes root@192.168.71.205     'rm -f /tmp/dr-async-test-result'
-```
-
-Test ini tidak menyentuh VM production maupun VM DR.
-
----
-
-# 25. Implementasi Jadwal Backup
-
-Setelah seluruh pengujian manual berhasil, masukkan backup ke cron.
-
-Contoh:
-
-```text
-0 5 * * * root vzdump 107 --compress zstd --mailnotification always --quiet 1 --storage local --mode snapshot
-```
-
-Pastikan cron menggunakan PATH yang benar.
-
-Contoh:
-
-```text
-PATH="/usr/sbin:/usr/bin:/sbin:/bin"
-```
-
-Setelah menyimpan:
-
-```bash
-crontab -l
-```
-
-Pastikan entry tersedia.
-
----
-
-# 26. Uji Integrasi End-to-End
-
-Setelah seluruh komponen diuji terpisah, lakukan satu siklus lengkap.
+Apabila DR digunakan untuk failover aktual, VM hasil restore dipromosikan menjadi VM aktif.
 
 Urutan:
 
 ```text
-1. Proxmox A menjalankan vzdump
-2. Backup lokal selesai
-3. Hook backup-end berjalan
-4. Backup dikirim ke NAS
-5. Ukuran source/target diverifikasi
-6. Retention NAS dijalankan
-7. SSH trigger dikirim ke Proxmox B
-8. Proxmox A selesai
-9. Proxmox B menjalankan restore
-10. Current DR shutdown
-11. Target DR restore
-12. Target prepare
-13. Target start
-14. Network check
-15. SSH check
-16. HTTP check
-17. Final health check
-18. Target promote
-19. Current lama dihapus
+1. Pastikan VM Production tidak lagi aktif.
+2. Pastikan tidak ada VM lain menggunakan IP produksi.
+3. Pastikan VM DR sudah lulus health check.
+4. Siapkan perubahan network dari isolated DR ke network aktif.
+5. Pastikan konfigurasi IP tetap menggunakan IP produksi.
+6. Aktifkan konektivitas produksi.
+7. Lakukan ping.
+8. Lakukan SSH.
+9. Lakukan HTTP/HTTPS.
+10. Lakukan verifikasi aplikasi.
+```
+
+> **PENTING:** Jangan mengaktifkan VM DR pada jaringan produksi sementara VM produksi dengan IP yang sama masih aktif.
+
+---
+
+# 16. Akses Setelah Failover
+
+Setelah VM DR dipromosikan:
+
+```text
+Client
+  |
+  v
+Network Production
+  |
+  v
+VM DR
+192.168.71.233
+```
+
+Lakukan pemeriksaan dari sisi client:
+
+- Ping
+- SSH
+- HTTP/HTTPS
+- Aplikasi
+- Database
+- Service terkait
+
+Pastikan akses berasal dari jaringan produksi dan bukan lagi melalui jalur isolasi DR.
+
+---
+
+# 17. Rollback Pengujian
+
+Jika pengujian tidak sesuai harapan, VM DR tetap dipertahankan dalam kondisi isolated.
+
+Jangan menghubungkan VM DR ke jaringan produksi apabila:
+
+- service belum sehat
+- IP belum benar
+- aplikasi gagal
+- database gagal
+- network belum benar
+- VM produksi masih aktif
+
+Prinsip rollback:
+
+```text
+VM DR gagal
+     |
+     v
+Tetap isolated
+     |
+     v
+VM Production tetap menjadi VM aktif
+```
+
+Pada implementasi dengan mekanisme slot restore, VM lama dipertahankan sampai VM hasil restore benar-benar sehat.
+
+---
+
+# 18. Pengelolaan Slot Restore
+
+Implementasi DR menggunakan konsep VM hasil restore sebagai **slot DR**.
+
+Contoh:
+
+```text
+VMID 117
+ONEMDORAYA
+```
+
+Setelah restore dan health check berhasil, slot tersebut menjadi kandidat VM DR aktif.
+
+Konsep slot bertujuan untuk:
+
+- menghindari konflik VMID
+- memisahkan VM production dan VM DR
+- memudahkan pengujian berulang
+- memudahkan rollback
+- menjaga VM production tetap aman selama pengujian
+
+---
+
+# 19. Form Pemeriksaan Restore
+
+Catat hasil setiap proses restore:
+
+```text
+Tanggal restore       :
+Jam restore           :
+VMID sumber           :
+VMID hasil restore    :
+Nama VM               :
+File backup           :
+Tanggal backup        :
+Storage target        :
+Bridge network        :
+IP VM                 :
+Status VM             :
+Ping                  :
+SSH                   :
+HTTP/HTTPS            :
+Service aplikasi      :
+Status health check   :
+Status DR             :
+Administrator         :
 ```
 
 ---
 
-# 27. Verifikasi Log End-to-End
+# 20. Kriteria Restore Berhasil
 
-## Proxmox A
+Restore dinyatakan **BERHASIL** apabila:
 
-```bash
-tail -100 /var/log/backup-to-nas.log
-```
+1. File backup dapat dibaca dari OMV.
+2. Restore selesai tanpa error.
+3. VM berhasil dibuat pada Proxmox DR.
+4. Disk VM berhasil ditempatkan pada storage DR.
+5. VM dapat melakukan boot.
+6. Network interface aktif.
+7. VM menggunakan `vmbr-dr` selama pengujian.
+8. IP VM sesuai dengan IP produksi.
+9. Ping berhasil.
+10. SSH berhasil.
+11. Service utama berjalan.
+12. HTTP/HTTPS berhasil apabila VM menyediakan layanan web.
+13. Tidak terjadi konflik dengan VM produksi.
+14. VM siap digunakan untuk proses failover apabila diperlukan.
 
-Cari:
+---
 
-```text
-Backup berhasil disalin dan diverifikasi.
-Retention NAS selesai.
-DR restore berhasil ditrigger di Proxmox B.
-Proxmox A tidak menunggu proses DR restore selesai.
-```
-
-## Proxmox B
-
-```bash
-tail -100 /var/log/dr-restore-ONEMDORAYA.log
-```
-
-Cari:
+# 21. Alur Standar Implementasi
 
 ```text
-DR RESTORE SUCCESS
+START
+  |
+  v
+Backup tersedia di OMV
+  |
+  v
+Mount NFS pada Proxmox DR
+  |
+  v
+Pilih backup yang akan direstore
+  |
+  v
+Tentukan VMID restore
+  |
+  v
+Restore langsung dari OMV
+  |
+  v
+Restore selesai?
+  |
+  +---- NO ----> Investigasi error
+  |
+ YES
+  |
+  v
+Periksa konfigurasi VM
+  |
+  v
+Set network = vmbr-dr
+  |
+  v
+Boot VM
+  |
+  v
+Health Check
+  |
+  +---- FAIL ---> Tetap isolated / rollback
+  |
+ PASS
+  |
+  v
+VM READY FOR DR
+  |
+  +---- TEST DR ----> Tetap isolated
+  |
+  +---- FAILOVER ---> Pastikan Production VM OFF
+                          |
+                          v
+                    Aktifkan network produksi
+                          |
+                          v
+                    Verifikasi layanan
+                          |
+                          v
+                         END
 ```
 
 ---
 
-# 28. Pengujian Failure / Rollback
+# 22. Checklist Implementasi Restore
 
-Pengujian rollback sebaiknya dilakukan pada window maintenance/test.
+## Infrastruktur
 
-Simulasikan kegagalan target setelah current tetap tersedia.
-
-Expected:
-
-```text
-CURRENT 118
-TARGET 117
-
-117 gagal
-    ↓
-117 dihentikan
-    ↓
-117 dihapus
-    ↓
-118 dijalankan
-```
-
-Hasil akhir:
-
-```text
-118 = RUNNING / CURRENT
-117 = tidak ada
-```
-
-Pastikan production VM `107` tetap tidak tersentuh.
-
----
-
-# 29. Validasi Akhir Implementasi
-
-Setelah implementasi selesai, jalankan:
-
-```bash
-qm list
-```
-
-Pastikan:
-
-```text
-VM 107 = tidak ada pada DR
-```
-
-Kemudian:
-
-```bash
-/usr/local/sbin/dr-validate.sh ONEMDORAYA
-```
-
-Expected:
-
-```text
-SAFETY VALIDATION: PASSED
-```
-
-Cek NFS:
-
-```bash
-mount | grep omv-backup
-```
-
-Cek backup NAS:
-
-```bash
-find /mnt/omv-backup/Regional -maxdepth 2 -type f
-```
-
-Cek retention:
-
-```bash
-find /mnt/omv-backup/Regional     -mindepth 1     -maxdepth 1     -type d     -printf '%f
-' | sort
-```
-
-Jumlah folder harus sesuai:
-
-```text
-<= 2
-```
-
----
-
-# 30. Operasional Harian
-
-Setelah implementasi selesai, operator cukup memonitor:
-
-### Backup Production
-
-```bash
-tail -50 /var/log/backup-to-nas.log
-```
-
-### DR Restore
-
-```bash
-tail -50 /var/log/dr-restore-ONEMDORAYA.log
-```
-
-### Status VM DR
-
-```bash
-qm list
-```
-
-### Status Current
-
-```bash
-/usr/local/sbin/dr-validate.sh ONEMDORAYA
-```
-
-Tidak perlu menjalankan restore secara manual pada kondisi normal.
-
----
-
-# 31. Prosedur Saat Backup Gagal
-
-Jika backup production gagal:
-
-```text
-Backup gagal
-    ↓
-Hook backup-end tidak dianggap berhasil
-    ↓
-Transfer NAS tidak dianggap berhasil
-    ↓
-DR tidak boleh dianggap berhasil
-```
-
-Periksa:
-
-```bash
-tail -100 /var/log/backup-to-nas.log
-```
-
-dan log Proxmox/vzdump.
-
-Jangan menghapus backup sebelumnya yang masih valid.
-
----
-
-# 32. Prosedur Saat Transfer NAS Gagal
-
-Periksa:
-
-```bash
-mountpoint -q /mnt/nas-backup
-```
-
-Kemudian:
-
-```bash
-df -h /mnt/nas-backup
-```
-
-Tes koneksi:
-
-```bash
-ping -c 4 192.168.71.211
-```
-
-Periksa:
-
-```bash
-tail -100 /var/log/backup-to-nas.log
-```
-
-Pastikan backup lama di NAS tetap tersedia.
-
----
-
-# 33. Prosedur Saat DR Restore Gagal
-
-Periksa:
-
-```bash
-tail -200 /var/log/dr-restore-ONEMDORAYA.log
-```
-
-Jika engine melakukan rollback:
-
-```text
-TARGET = dihapus
-CURRENT = dijalankan kembali
-```
-
-Jangan melakukan delete manual sebelum memastikan status VM.
-
-Validasi:
-
-```bash
-qm list
-```
-
-Kemudian:
-
-```bash
-/usr/local/sbin/dr-validate.sh ONEMDORAYA
-```
-
----
-
-# 34. Prosedur Failover Manual
-
-Jika suatu saat DR benar-benar harus digunakan sebagai production:
-
-1. Pastikan production VM dihentikan atau jaringan production sudah tidak aktif.
-2. Pastikan current DR VM sehat.
-3. Nonaktifkan isolasi network DR sesuai prosedur failover yang telah diuji.
-4. Pastikan IP `192.168.71.233` hanya aktif pada satu sisi.
-5. Uji akses aplikasi.
-6. Catat waktu dan kondisi failover.
-
-> Jangan mengaktifkan koneksi production dan DR dengan IP yang sama secara bersamaan karena dapat menyebabkan konflik IP/ARP.
-
----
-
-# 35. Checklist Implementasi
-
-Gunakan checklist berikut saat implementasi.
-
-## A. NAS
-
-- [ ] NFS Server aktif
-- [ ] `/export/Backup_VM` tersedia
-- [ ] Network `192.168.71.0/24` diizinkan
-- [ ] Proxmox dapat mengakses NAS
-
-## B. Proxmox A
-
-- [ ] VM 107 tersedia
-- [ ] `vzdump` berhasil manual
-- [ ] `backup-to-nas.sh` tersedia
-- [ ] Transfer manual berhasil
-- [ ] Verifikasi ukuran berhasil
-- [ ] Retention berhasil
-- [ ] `vzdump-hook.sh` tersedia
-- [ ] `/etc/vzdump.conf` menunjuk ke hook
-- [ ] Cron aktif
-
-## C. Proxmox B
-
-- [ ] NFS client tersedia
+- [ ] Proxmox DR aktif
+- [ ] Storage `local-lvm` tersedia
+- [ ] NFS OMV dapat diakses
 - [ ] `/mnt/omv-backup` tersedia
-- [ ] NFS mount berhasil
-- [ ] `Regional` terlihat
-- [ ] `vmbr-dr` tersedia
-- [ ] Route ke `192.168.71.233` tersedia
-- [ ] VM 107 tidak ada
-- [ ] Slot 117 dan 118 tersedia
+- [ ] `/mnt/omv-backup/Regional` dapat dibaca
+- [ ] Backup tersedia
 
-## D. DR Engine
+## Restore
 
-- [ ] Configuration tersedia
-- [ ] `dr-prepare-vm.sh` tersedia
-- [ ] `dr-health-check.sh` tersedia
-- [ ] `dr-rollback.sh` tersedia
-- [ ] `dr-restore-reusable.sh` tersedia
-- [ ] `dr-validate.sh` berhasil
-- [ ] Current VM sehat
+- [ ] Backup yang benar dipilih
+- [ ] VMID target tidak konflik
+- [ ] Restore selesai
+- [ ] Disk tersedia
+- [ ] VM configuration tersedia
+- [ ] CPU sesuai kemampuan DR
+- [ ] RAM sesuai kebutuhan
 
-## E. SSH
+## Network
 
-- [ ] SSH A → B berhasil
-- [ ] BatchMode berhasil
-- [ ] Tidak meminta password
-- [ ] Async dummy test berhasil
+- [ ] Network VM menggunakan `vmbr-dr`
+- [ ] IP VM sesuai IP produksi
+- [ ] Route `/32` menuju IP VM menggunakan `vmbr-dr`
+- [ ] Tidak ada konflik IP dengan production VM
 
-## F. End-to-End
+## Health Check
 
-- [ ] Backup production berhasil
-- [ ] Backup masuk NAS
-- [ ] Verifikasi berhasil
-- [ ] Retention berhasil
-- [ ] Trigger DR berhasil
-- [ ] Restore DR berhasil
-- [ ] Health check berhasil
-- [ ] Promote berhasil
-- [ ] VM lama terhapus setelah promote
-- [ ] Rollback sudah diuji
+- [ ] VM running
+- [ ] Ping PASS
+- [ ] SSH PASS
+- [ ] HTTP/HTTPS PASS
+- [ ] Service aplikasi PASS
+- [ ] Database PASS jika diperlukan
+- [ ] Health check keseluruhan PASS
+
+## Failover
+
+- [ ] Production VM dihentikan terlebih dahulu
+- [ ] Tidak ada device/VM lain menggunakan IP produksi
+- [ ] VM DR siap
+- [ ] Network DR dipromosikan ke jaringan produksi
+- [ ] Ping dari client PASS
+- [ ] SSH dari client PASS
+- [ ] Aplikasi dapat diakses
+- [ ] Status failover dicatat
 
 ---
 
-# 36. Hasil Akhir Implementasi
+# 23. Prinsip Operasional
 
-Jika seluruh tahap selesai, sistem akan bekerja otomatis:
+### 1. Production tidak disentuh saat pengujian
+
+Pengujian dilakukan dengan VM DR dalam kondisi isolated.
+
+### 2. IP produksi tetap dipertahankan
+
+VM DR tidak membutuhkan IP sementara seperti `10.99.0.0/24`.
+
+### 3. Restore langsung dari OMV
+
+Tidak diperlukan copy manual backup ke `/var/lib/vz/dump`.
+
+### 4. Isolasi dilakukan sebelum VM aktif
+
+VM hasil restore harus menggunakan `vmbr-dr` selama proses validasi.
+
+### 5. Health check dilakukan sebelum failover
+
+VM tidak boleh dipromosikan hanya karena proses restore berhasil.
+
+### 6. Production dan DR tidak boleh aktif bersamaan pada IP yang sama
+
+Ini merupakan kontrol utama untuk mencegah konflik jaringan.
+
+### 7. VM hasil restore dipertahankan sampai validasi selesai
+
+VM production tidak dihapus atau digantikan sebelum VM DR dinyatakan sehat.
+
+---
+
+# 24. Status Implementasi
+
+Implementasi berikut telah diuji:
 
 ```text
-05:00
-  |
-  v
-BACKUP VM 107
-  |
-  v
-BACKUP LOKAL SELESAI
-  |
-  v
-COPY KE NAS
-  |
-  v
-VERIFY
-  |
-  v
-RETENTION = 2
-  |
-  v
-TRIGGER PROXMOX B
-  |
-  +--------------------------+
-                             |
-                             v
-                       RESTORE DR
-                             |
-                             v
-                       HEALTH CHECK
-                       /                               FAIL           OK
-                     |              |
-                     v              v
-                 ROLLBACK        PROMOTE
-                     |              |
-                     v              v
-                CURRENT LAMA     VM BARU
-                  RUNNING         CURRENT
+Backup OMV
+     ↓
+NFS Mount
+     ↓
+Restore langsung dari OMV
+     ↓
+VMID baru
+     ↓
+Storage local-lvm
+     ↓
+vmbr-dr
+     ↓
+IP produksi 192.168.71.233
+     ↓
+Boot VM
+     ↓
+Ping       PASS
+SSH        PASS
+HTTP       PASS
+Service    PASS
+     ↓
+READY FOR DR
 ```
 
-Dengan desain ini:
-
-- Proxmox A fokus pada backup dan pengiriman trigger.
-- NAS menjadi repository backup.
-- Proxmox B menangani proses DR secara mandiri.
-- Restore berjalan asynchronous.
-- VM lama tetap menjadi rollback point sampai VM baru sehat.
-- Retention NAS tidak mengganggu backup lokal.
-- VM production tidak digunakan sebagai VM DR.
-- IP VM DR tetap sama karena network DR diisolasi.
-- Siklus DR menggunakan dua slot VM secara bergantian.
-
----
-
-# 37. Referensi Konfigurasi Implementasi
-
-| Item              | Nilai                                    |
-| ----------------- | ---------------------------------------- |
-| Proxmox A         | `192.168.71.202`                         |
-| Proxmox B         | `192.168.71.205`                         |
-| NAS OMV           | `192.168.71.211`                         |
-| NFS Export        | `/export/Backup_VM`                      |
-| NFS Mount DR      | `/mnt/omv-backup`                        |
-| Backup Root       | `/Regional`                              |
-| Production VMID   | `107`                                    |
-| DR Slot A         | `117`                                    |
-| DR Slot B         | `118`                                    |
-| VM Name           | `ONEMDORAYA`                             |
-| VM IP             | `192.168.71.233`                         |
-| DR Bridge         | `vmbr-dr`                                |
-| DR Management IP  | `192.168.71.253/32`                      |
-| DR Storage        | `local-lvm`                              |
-| Retention         | `2`                                      |
-| Backup Log        | `/var/log/backup-to-nas.log`             |
-| DR Log            | `/var/log/dr-restore-ONEMDORAYA.log`     |
-| DR Config         | `/usr/local/etc/dr/ONEMDORAYA.conf`      |
-| DR Restore Engine | `/usr/local/sbin/dr-restore-reusable.sh` |
+Standar ini dapat digunakan sebagai baseline implementasi restore Disaster Recovery untuk VM Proxmox yang menggunakan backup tersimpan di OMV.
