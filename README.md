@@ -1,10 +1,10 @@
-# README — Standar Implementasi Restore Disaster Recovery Proxmox
+# Standar Implementasi Restore Disaster Recovery Proxmox
 
 **Dokumen:** Tutorial Implementasi Restore / Disaster Recovery  
 **Platform:** Proxmox VE + OpenMediaVault (OMV)  
 **Model:** Restore VM Production ke Proxmox DR dari backup OMV  
 **Status:** Implementasi final / teruji  
-**Versi:** 1.1
+**Versi:** 1.2
 
 ---
 
@@ -119,6 +119,145 @@ Setelah VM lulus health check dan diperlukan untuk failover, koneksi VM dapat di
 ---
 
 # 4. Tutorial Restore
+
+## Step 0 — Persiapan Standar Lingkungan Proxmox DR
+
+Sebelum masuk ke proses restore, Proxmox DR harus memiliki lingkungan jaringan dan storage yang sudah siap. Bagian ini menjadi **standar awal setiap Proxmox DR baru**.
+
+### 0.1 Konfigurasi `vmbr-dr`
+
+`vmbr-dr` digunakan sebagai bridge isolasi untuk VM hasil restore dan **tidak menggunakan physical NIC**.
+
+Edit:
+
+```bash
+nano /etc/network/interfaces
+```
+
+Konfigurasi dasar:
+
+```text
+auto vmbr-dr
+iface vmbr-dr inet static
+        address 192.168.71.253/32
+        bridge-ports none
+        bridge-stp off
+        bridge-fd 0
+        post-up ip route add 192.168.71.233/32 dev vmbr-dr src 192.168.71.253
+        post-down ip route del 192.168.71.233/32 dev vmbr-dr src 192.168.71.253
+```
+
+Keterangan:
+
+| Parameter            | Fungsi                                                  |
+| -------------------- | ------------------------------------------------------- |
+| `vmbr-dr`            | Bridge khusus VM DR                                     |
+| `192.168.71.253/32`  | IP khusus Proxmox DR pada jalur DR                      |
+| `bridge-ports none`  | Tidak terhubung langsung ke physical NIC                |
+| `192.168.71.233/32`  | Route menuju IP VM Production yang sedang direstore     |
+| `src 192.168.71.253` | Source IP Proxmox DR untuk komunikasi melalui `vmbr-dr` |
+
+> Untuk Proxmox DR berikutnya, **IP khusus `vmbr-dr` harus unik**. IP route `/32` mengikuti IP Production VM yang sedang direstore.
+
+### 0.2 Terapkan dan verifikasi network
+
+Setelah konfigurasi diterapkan sesuai prosedur maintenance Proxmox, cek:
+
+```bash
+ip addr show vmbr-dr
+```
+
+Pastikan terdapat:
+
+```text
+192.168.71.253/32
+```
+
+Kemudian cek route:
+
+```bash
+ip route get 192.168.71.233
+```
+
+Expected:
+
+```text
+192.168.71.233 dev vmbr-dr src 192.168.71.253
+```
+
+Jika route masih menggunakan `vmbr0`, **jangan lanjut ke proses restore/testing**.
+
+### 0.3 Siapkan mount point NFS
+
+Buat mount point:
+
+```bash
+mkdir -p /mnt/omv-backup
+```
+
+Edit:
+
+```bash
+nano /etc/fstab
+```
+
+Tambahkan:
+
+```text
+192.168.71.211:/export/Backup_VM /mnt/omv-backup nfs defaults,_netdev 0 0
+```
+
+Keterangan:
+
+| Parameter   | Nilai               |
+| ----------- | ------------------- |
+| NFS Server  | `192.168.71.211`    |
+| Export      | `/export/Backup_VM` |
+| Mount point | `/mnt/omv-backup`   |
+| Opsi        | `defaults,_netdev`  |
+
+### 0.4 Uji NFS
+
+Jalankan:
+
+```bash
+mount -a
+```
+
+Verifikasi:
+
+```bash
+mountpoint -q /mnt/omv-backup && echo "NFS OK"
+```
+
+Kemudian:
+
+```bash
+ls -lah /mnt/omv-backup/Regional
+```
+
+Pastikan folder backup dapat dibaca.
+
+### 0.5 Verifikasi akhir lingkungan DR
+
+Sebelum restore, seluruh kondisi berikut harus terpenuhi:
+
+```text
+[ ] vmbr0 Production normal
+[ ] vmbr-dr tersedia
+[ ] vmbr-dr menggunakan bridge-ports none
+[ ] IP vmbr-dr = 192.168.71.253/32
+[ ] Route IP VM menggunakan vmbr-dr
+[ ] /mnt/omv-backup tersedia
+[ ] Entry NFS terdapat di /etc/fstab
+[ ] mount -a berhasil
+[ ] /mnt/omv-backup/Regional dapat dibaca
+[ ] File backup tersedia
+```
+
+Jika seluruh pemeriksaan PASS, lanjut ke Step 1.
+
+---
 
 ## Step 1 — Login ke Proxmox DR
 
