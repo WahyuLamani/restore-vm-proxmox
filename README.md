@@ -1,99 +1,58 @@
 # README — Standar Implementasi Restore Disaster Recovery Proxmox
 
-**Dokumen:** Standar Implementasi Restore / Disaster Recovery  
+**Dokumen:** Tutorial Implementasi Restore / Disaster Recovery  
 **Platform:** Proxmox VE + OpenMediaVault (OMV)  
-**Model:** Restore VM produksi ke Proxmox DR menggunakan backup yang tersimpan di OMV  
+**Model:** Restore VM Production ke Proxmox DR dari backup OMV  
 **Status:** Implementasi final / teruji  
-**Versi:** 1.0
+**Versi:** 1.1
 
 ---
 
-## 1. Tujuan
+# 1. Tujuan
 
-Dokumen ini menjadi standar implementasi untuk proses **restore VM Proxmox ke server Disaster Recovery (DR)** menggunakan backup yang tersimpan pada OpenMediaVault.
+Dokumen ini merupakan panduan standar **tahapan restore VM Production ke Proxmox DR** menggunakan backup yang tersimpan di OpenMediaVault.
 
-Standar ini mengikuti implementasi yang telah diuji, dengan prinsip:
+Alur yang digunakan:
 
-- Proxmox DR mengambil backup langsung dari OMV melalui NFS.
-- Tidak perlu menyalin file backup secara manual ke `/var/lib/vz/dump`.
-- VM hasil restore menggunakan **IP produksi yang sama**.
-- VM hasil restore ditempatkan terlebih dahulu pada jaringan **isolasi DR**.
-- Akses administrasi dan health check tetap dapat dilakukan tanpa mematikan VM produksi.
-- Setelah VM tervalidasi, VM dapat dipromosikan menjadi VM aktif saat diperlukan.
-- Proses restore dapat digunakan untuk **uji DR** maupun **actual failover**.
+```text
+Backup di OMV
+      ↓
+Mount NFS pada Proxmox DR
+      ↓
+Pilih backup
+      ↓
+Restore ke VMID baru
+      ↓
+Set network VM ke vmbr-dr
+      ↓
+Boot VM
+      ↓
+Akses melalui jalur DR
+      ↓
+Health Check
+      ↓
+READY FOR DR
+      ↓
+Failover jika diperlukan
+```
 
-> **Catatan:** Dokumen ini hanya membahas implementasi restore/DR. Proses pembuatan backup dan script backup tidak dibahas di dalam dokumen ini.
+Dokumen ini **tidak membahas pembuatan backup, script backup, maupun script restore**.
 
 ---
 
-## 2. Arsitektur Restore
+# 2. Infrastruktur yang Digunakan
 
-```text
-                 PRODUCTION
-              Proxmox A
-           192.168.71.202
-                  |
-                  | Backup
-                  v
-        +----------------------+
-        |   OpenMediaVault     |
-        |   192.168.71.211     |
-        |                      |
-        | /export/Backup_VM    |
-        |      /Regional       |
-        +----------+-----------+
-                   |
-                   | NFS
-                   v
-        +----------------------+
-        |    Proxmox DR / B    |
-        |    192.168.71.205    |
-        |                      |
-        |   local-lvm          |
-        |   vmbr0              |
-        |   vmbr-dr            |
-        +----------+-----------+
-                   |
-                   | Isolated DR VM
-                   v
-            Production IP
-            192.168.71.233
-```
+## 2.1 Proxmox Production
 
-### Prinsip jaringan
+| Parameter             | Nilai            |
+| --------------------- | ---------------- |
+| IP Proxmox Production | `192.168.71.202` |
+| VM Production         | `107`            |
+| Nama VM               | `ONEMDORAYA`     |
+| IP VM                 | `192.168.71.233` |
+| Gateway               | `192.168.71.100` |
 
-VM hasil restore **tidak langsung ditempatkan pada `vmbr0`**.
-
-VM terlebih dahulu menggunakan:
-
-```text
-vmbr-dr
-```
-
-Dengan demikian VM dapat menggunakan IP produksi:
-
-```text
-192.168.71.233
-```
-
-tanpa langsung berada pada jaringan produksi melalui bridge utama.
-
----
-
-# 3. Komponen Infrastruktur
-
-## 3.1 Proxmox Production
-
-| Parameter   | Nilai            |
-| ----------- | ---------------- |
-| Host        | Proxmox A        |
-| IP          | `192.168.71.202` |
-| VM Produksi | `VMID 107`       |
-| Nama VM     | `ONEMDORAYA`     |
-| IP VM       | `192.168.71.233` |
-| Gateway     | `192.168.71.100` |
-
-## 3.2 OpenMediaVault
+## 2.2 OpenMediaVault
 
 | Parameter     | Nilai               |
 | ------------- | ------------------- |
@@ -104,10 +63,9 @@ tanpa langsung berada pada jaringan produksi melalui bridge utama.
 Struktur backup:
 
 ```text
-/export/Backup_VM/
-└── Regional/
-    └── YYYY-MM-DD/
-        └── backup VM
+/Regional/
+└── YYYY-MM-DD/
+    └── vzdump-qemu-VMID-YYYY_MM_DD-HH_MM_SS.vma.zst
 ```
 
 Contoh:
@@ -118,303 +76,304 @@ Contoh:
     └── vzdump-qemu-107-2026_09_21-07_00_02.vma.zst
 ```
 
-## 3.3 Proxmox DR
+## 2.3 Proxmox DR
 
-| Parameter       | Nilai            |
-| --------------- | ---------------- |
-| Host            | Proxmox B / DR   |
-| IP              | `192.168.71.205` |
-| Storage restore | `local-lvm`      |
-| Bridge utama    | `vmbr0`          |
-| Bridge isolasi  | `vmbr-dr`        |
-
----
-
-# 4. Prasyarat Restore
-
-Sebelum melakukan restore, pastikan:
-
-- Proxmox DR dalam kondisi normal.
-- Storage `local-lvm` tersedia dan memiliki kapasitas yang cukup.
-- Server DR dapat mengakses OMV.
-- NFS backup OMV dapat di-mount pada Proxmox DR.
-- Folder `/Regional` dapat dibaca.
-- File backup VM tersedia dan dapat dibaca.
-- VM produksi masih dapat berjalan apabila pengujian dilakukan tanpa failover.
-- Konfigurasi jaringan `vmbr-dr` tersedia.
-- IP produksi VM yang akan direstore sudah diketahui.
-- VMID target pada Proxmox DR tidak sedang digunakan oleh VM lain.
-- Tidak ada VM DR lain yang menggunakan IP produksi yang sama pada jaringan aktif.
+| Parameter         | Nilai            |
+| ----------------- | ---------------- |
+| IP Proxmox DR     | `192.168.71.205` |
+| Storage restore   | `local-lvm`      |
+| Bridge Production | `vmbr0`          |
+| Bridge Isolasi DR | `vmbr-dr`        |
+| Source IP DR      | `192.168.71.253` |
 
 ---
 
-# 5. Mount Backup OMV pada Proxmox DR
+# 3. Konsep Restore
 
-Backup diakses langsung dari OMV melalui NFS.
-
-Mount point standar:
-
-```text
-/mnt/omv-backup
-```
-
-Setelah mount berhasil, lokasi backup harus dapat diakses melalui:
-
-```text
-/mnt/omv-backup/Regional
-```
-
-Pastikan folder tanggal dan file backup tersedia, misalnya:
-
-```text
-/mnt/omv-backup/Regional/2026-09-21/
-```
-
----
-
-# 6. Pemilihan Backup
-
-Pilih backup berdasarkan kebutuhan restore.
-
-Prioritas pemilihan:
-
-1. Backup terbaru yang tersedia.
-2. Backup merupakan backup VM yang benar.
-3. File backup dapat dibaca dari NFS.
-4. VMID sumber sesuai dengan VM yang akan direstore.
+VM hasil restore **tetap menggunakan IP Production**.
 
 Contoh:
 
 ```text
-vzdump-qemu-107-2026_09_21-07_00_02.vma.zst
+Production VM
+IP: 192.168.71.233
+
+DR VM
+IP: 192.168.71.233
 ```
 
-Informasi penting:
+Agar tidak terjadi konflik IP, VM DR **tidak boleh langsung menggunakan `vmbr0`**.
+
+Selama proses restore dan pengujian:
 
 ```text
-VMID     : 107
-Tanggal  : 2026-09-21
-```
-
----
-
-# 7. Restore Langsung dari OMV
-
-Restore dilakukan langsung dari lokasi backup yang telah di-mount.
-
-Alur:
-
-```text
-OMV
- |
- | NFS
- v
-Proxmox DR
- |
- | Restore
- v
-local-lvm
- |
- v
-VM baru
-```
-
-Tidak diperlukan proses:
-
-```text
-OMV
-  ↓
-copy backup
-  ↓
-/var/lib/vz/dump
-  ↓
-restore
-```
-
-File backup tetap berada di OMV dan Proxmox DR membaca sumber backup langsung melalui NFS.
-
----
-
-# 8. Penentuan VMID Restore
-
-VMID hasil restore harus dipastikan tidak sedang digunakan.
-
-Contoh:
-
-```text
-VM produksi       : 107
-VM hasil restore  : 117
-```
-
-Penggunaan VMID baru digunakan untuk proses pengujian restore agar VM production dan VM DR menjadi dua objek VM yang berbeda.
-
----
-
-# 9. Parameter VM Hasil Restore
-
-Setelah proses restore selesai, periksa konfigurasi VM.
-
-| Parameter   | Standar                      |
-| ----------- | ---------------------------- |
-| Nama VM     | Sama dengan VM produksi      |
-| RAM         | Sesuai kebutuhan VM produksi |
-| CPU         | Sesuai kemampuan node DR     |
-| Storage     | `local-lvm`                  |
-| Disk        | Sesuai ukuran backup         |
-| Network     | `vmbr-dr`                    |
-| IP VM       | IP produksi                  |
-| Gateway     | Gateway produksi             |
-| MAC Address | Dicatat dan diverifikasi     |
-| Boot        | Sesuai kebutuhan DR          |
-
-Pada implementasi yang telah diuji:
-
-```text
-RAM     : 12 GB
-CPU     : 4 vCPU
-Storage : local-lvm
-Bridge  : vmbr-dr
-IP      : 192.168.71.233
-```
-
-Jumlah CPU harus disesuaikan dengan kemampuan node DR. Pada node DR yang diuji, penggunaan lebih dari 4 vCPU untuk VM tersebut tidak diperbolehkan oleh konfigurasi node.
-
----
-
-# 10. Network Isolation
-
-VM hasil restore tetap menggunakan IP produksi:
-
-```text
-192.168.71.233
-```
-
-Namun network interface VM ditempatkan pada:
-
-```text
-vmbr-dr
-```
-
-bukan:
-
-```text
-vmbr0
-```
-
-Tujuannya mencegah VM hasil restore langsung berkomunikasi dengan jaringan produksi dan menyebabkan konflik IP.
-
-### Kondisi pengujian
-
-```text
-VM Production
-192.168.71.233
-      |
-      +---- jaringan produksi
-
 VM DR
-192.168.71.233
-      |
-      +---- vmbr-dr
-             |
-             +---- isolated
+  |
+  +--- vmbr-dr
+          |
+          +--- Isolated
 ```
 
-Kedua VM dapat memiliki IP yang sama selama berada pada segmen jaringan yang benar-benar terisolasi.
+Setelah VM lulus health check dan diperlukan untuk failover, koneksi VM dapat dipromosikan ke jaringan Production.
 
 ---
 
-# 11. Akses Administrasi Saat VM Terisolasi
+# 4. Tutorial Restore
 
-Walaupun VM DR menggunakan IP produksi, administrator tetap perlu melakukan:
+## Step 1 — Login ke Proxmox DR
 
-- ping
-- SSH
-- HTTP/HTTPS
-- health check
-- pemeriksaan service
-
-Pada implementasi final, akses dilakukan melalui routing khusus pada host Proxmox DR.
-
-Parameter:
+Login ke server Proxmox DR:
 
 ```text
-DR Host       : 192.168.71.205
-DR VM         : 192.168.71.233
-DR Source IP  : 192.168.71.253
-Bridge        : vmbr-dr
+192.168.71.205
 ```
 
-Route khusus diarahkan ke VM:
+Contoh:
 
-```text
-192.168.71.233/32
+```bash
+ssh root@192.168.71.205
 ```
-
-sehingga traffic menuju IP tersebut dari host DR menggunakan `vmbr-dr`.
-
-Hasil pengujian:
-
-- route menuju `192.168.71.233` menggunakan `vmbr-dr`
-- ping berhasil
-- ARP VM berhasil
-- HTTP menghasilkan `HTTP/1.1 200 OK`
-- SSH berhasil masuk ke server Ubuntu
-- akses administrasi dari PC dapat dilakukan melalui SSH tunnel ke Proxmox DR
 
 ---
 
-# 12. Verifikasi Setelah Restore
+## Step 2 — Pastikan NFS Backup OMV Ter-mount
 
-Jangan langsung melakukan failover setelah restore.
+Cek mount:
 
-Lakukan health check terlebih dahulu.
-
-## 12.1 Verifikasi VM
-
-Pastikan VM dalam kondisi:
-
-```text
-running
+```bash
+mountpoint /mnt/omv-backup
 ```
 
-Periksa:
+Kemudian cek isi backup:
 
-- CPU
-- RAM
-- disk
-- network interface
-- boot configuration
-- hostname
-- IP address
-
-## 12.2 Verifikasi Network
-
-Pastikan route menuju:
-
-```text
-192.168.71.233
+```bash
+ls -lah /mnt/omv-backup/Regional
 ```
 
-menggunakan:
+Lihat file backup:
 
-```text
-vmbr-dr
+```bash
+find /mnt/omv-backup/Regional -maxdepth 2 -type f -name "*.vma.zst"
 ```
 
-bukan:
+Contoh:
 
 ```text
-vmbr0
+/mnt/omv-backup/Regional/2026-09-21/vzdump-qemu-107-2026_09_21-07_00_02.vma.zst
 ```
 
-## 12.3 Verifikasi ICMP
+> Restore dilakukan langsung dari NFS OMV. File backup tidak perlu disalin manual ke `/var/lib/vz/dump`.
 
-Lakukan ping melalui interface DR.
+---
+
+## Step 3 — Pilih Backup
+
+Tentukan backup yang akan digunakan.
+
+Contoh:
+
+```text
+/Regional/2026-09-21/
+└── vzdump-qemu-107-2026_09_21-07_00_02.vma.zst
+```
+
+Pastikan VMID sumber dan tanggal backup sesuai kebutuhan.
+
+Cek ukuran file:
+
+```bash
+ls -lh /mnt/omv-backup/Regional/2026-09-21/
+```
+
+---
+
+## Step 4 — Tentukan VMID Hasil Restore
+
+Gunakan **VMID baru**.
+
+Contoh implementasi:
+
+```text
+VM Production : 107
+VM DR         : 117
+```
+
+Pastikan VMID target belum digunakan:
+
+```bash
+qm status 117
+```
+
+Lihat daftar VM:
+
+```bash
+qm list
+```
+
+Pastikan tidak ada VM dengan VMID `117`.
+
+---
+
+## Step 5 — Restore ke `local-lvm`
+
+Restore langsung dari file backup yang berada pada NFS OMV:
+
+```bash
+qmrestore /mnt/omv-backup/Regional/2026-09-21/vzdump-qemu-107-2026_09_21-07_00_02.vma.zst 117 --storage local-lvm
+```
+
+Keterangan:
+
+```text
+Source backup : file .vma.zst di OMV
+VMID target   : 117
+Storage       : local-lvm
+```
+
+Tunggu sampai proses restore selesai. Jangan menghentikan proses restore sebelum selesai.
+
+---
+
+## Step 6 — Verifikasi Hasil Restore
+
+Periksa konfigurasi:
+
+```bash
+qm config 117
+```
+
+Periksa status:
+
+```bash
+qm status 117
+```
+
+Periksa disk dan storage melalui:
+
+```bash
+qm config 117
+```
+
+Contoh parameter hasil restore:
+
+```text
+VMID       : 117
+Name       : ONEMDORAYA
+RAM        : 12 GB
+CPU        : 4 vCPU
+Disk       : local-lvm
+```
+
+Pastikan konfigurasi VM sudah terbentuk sebelum melanjutkan.
+
+---
+
+## Step 7 — Set Network ke `vmbr-dr`
+
+Ini adalah langkah **wajib sebelum VM dinyalakan**.
+
+Periksa konfigurasi:
+
+```bash
+qm config 117
+```
+
+Pastikan interface menggunakan:
+
+```text
+bridge=vmbr-dr
+```
+
+Jika hasil restore masih menggunakan `vmbr0`, ubah ke `vmbr-dr`.
+
+Contoh:
+
+```bash
+qm set 117 --net0 virtio=<MAC_ADDRESS>,bridge=vmbr-dr,firewall=1
+```
+
+Verifikasi kembali:
+
+```bash
+qm config 117
+```
 
 Expected:
 
 ```text
-PING 192.168.71.233
+net0: virtio=<MAC_ADDRESS>,bridge=vmbr-dr,firewall=1
+```
+
+> **Jangan start VM sebelum network berada pada `vmbr-dr`.**
+
+---
+
+## Step 8 — Pastikan IP VM Tetap IP Production
+
+VM hasil restore tetap menggunakan:
+
+```text
+IP      : 192.168.71.233
+Gateway : 192.168.71.100
+```
+
+Tidak perlu mengganti IP ke jaringan sementara seperti `10.99.0.0/24`.
+
+Isolasi dilakukan melalui `vmbr-dr`.
+
+---
+
+## Step 9 — Start VM DR
+
+Nyalakan VM:
+
+```bash
+qm start 117
+```
+
+Cek status:
+
+```bash
+qm status 117
+```
+
+Expected:
+
+```text
+status: running
+```
+
+---
+
+## Step 10 — Verifikasi Route DR
+
+Pastikan route menuju IP VM menggunakan `vmbr-dr`:
+
+```bash
+ip route get 192.168.71.233
+```
+
+Expected:
+
+```text
+192.168.71.233 dev vmbr-dr src 192.168.71.253
+```
+
+Artinya traffic menuju VM DR menggunakan interface isolasi `vmbr-dr`.
+
+---
+
+## Step 11 — Verifikasi Ping
+
+Lakukan ping melalui interface DR:
+
+```bash
+ping -I vmbr-dr 192.168.71.233
+```
+
+Expected:
+
+```text
 64 bytes from 192.168.71.233
 ```
 
@@ -424,17 +383,23 @@ Status:
 PASS
 ```
 
-## 12.4 Verifikasi SSH
+---
 
-Lakukan koneksi SSH ke VM hasil restore.
+## Step 12 — Verifikasi ARP
 
-Expected:
+Cek ARP:
 
-```text
-SSH connection successful
+```bash
+ip neigh show 192.168.71.233
 ```
 
-Verifikasi login menggunakan user administrasi yang sesuai.
+Expected terdapat MAC address VM pada `vmbr-dr`.
+
+Contoh:
+
+```text
+192.168.71.233 dev vmbr-dr lladdr 62:97:d0:79:bf:21 REACHABLE
+```
 
 Status:
 
@@ -442,12 +407,39 @@ Status:
 PASS
 ```
 
-## 12.5 Verifikasi Service
+---
+
+## Step 13 — Verifikasi SSH
+
+Karena VM menggunakan IP Production tetapi masih terisolasi, akses administrator dilakukan melalui jalur DR.
+
+Dari PC administrator:
+
+```bash
+ssh -L 2222:192.168.71.233:22 root@192.168.71.205
+```
+
+Dari terminal lain:
+
+```bash
+ssh -p 2222 regional@127.0.0.1
+```
+
+Jika berhasil masuk ke VM hasil restore:
+
+```text
+SSH = PASS
+```
+
+---
+
+## Step 14 — Verifikasi HTTP/HTTPS dan Service
 
 Periksa service utama VM, misalnya:
 
 ```text
-Apache / Nginx
+Apache
+Nginx
 Database
 Application
 API
@@ -455,7 +447,7 @@ API
 
 Untuk aplikasi web, lakukan pemeriksaan HTTP/HTTPS.
 
-Expected:
+Pada implementasi yang telah diuji, hasilnya:
 
 ```text
 HTTP/1.1 200 OK
@@ -464,269 +456,207 @@ HTTP/1.1 200 OK
 Status:
 
 ```text
-PASS
+HTTP/HTTPS = PASS
 ```
 
 ---
 
-# 13. Health Check Minimum
+# 5. Health Check dan Status READY FOR DR
 
-VM hanya dianggap **READY FOR DR** apabila minimal pemeriksaan berikut berhasil:
+VM hasil restore dinyatakan **READY FOR DR** jika seluruh pemeriksaan berikut berhasil:
 
-| Pemeriksaan             | Status |
-| ----------------------- | ------ |
-| VM running              | PASS   |
-| Disk terbaca            | PASS   |
-| Network interface aktif | PASS   |
-| IP sesuai               | PASS   |
-| vmbr-dr aktif           | PASS   |
-| Route DR benar          | PASS   |
-| Ping                    | PASS   |
-| SSH                     | PASS   |
-| HTTP/HTTPS              | PASS   |
-| Service aplikasi        | PASS   |
+| Pemeriksaan             | Hasil |
+| ----------------------- | ----- |
+| Restore selesai         | PASS  |
+| VM configuration        | PASS  |
+| Disk `local-lvm`        | PASS  |
+| VM running              | PASS  |
+| Network `vmbr-dr`       | PASS  |
+| IP `192.168.71.233`     | PASS  |
+| Route melalui `vmbr-dr` | PASS  |
+| Ping                    | PASS  |
+| ARP                     | PASS  |
+| SSH                     | PASS  |
+| HTTP/HTTPS              | PASS  |
+| Service aplikasi        | PASS  |
 
-Jika salah satu pemeriksaan kritis gagal, VM tidak boleh dipromosikan sebagai VM aktif.
+Jika pemeriksaan kritis gagal, **jangan hubungkan VM DR ke jaringan Production**.
 
 ---
 
-# 14. Mode Pengujian DR
+# 6. Kondisi Akhir Mode Testing
 
-Pada mode pengujian:
+Jika restore hanya untuk pengujian DR, kondisi akhir:
 
 ```text
 Production VM
 192.168.71.233
-    |
-    +--- tetap berjalan
+       |
+       +---- vmbr0 / Production
+       |
+       +---- tetap aktif
+
 
 DR VM
 192.168.71.233
-    |
-    +--- vmbr-dr
-         |
-         +--- isolated
+       |
+       +---- vmbr-dr
+              |
+              +---- isolated
 ```
 
-Tujuan mode ini adalah memastikan:
-
-- backup dapat direstore
-- VM dapat boot
-- storage dapat digunakan
-- network VM benar
-- service dapat berjalan
-- administrator dapat melakukan health check
-
-Tanpa mematikan VM produksi.
+Dengan kondisi ini VM Production dan VM DR dapat diuji tanpa konflik IP pada jaringan Production.
 
 ---
 
-# 15. Promosi VM Menjadi VM Aktif
+# 7. Failover — Promosi VM DR Menjadi VM Aktif
 
-Apabila DR digunakan untuk failover aktual, VM hasil restore dipromosikan menjadi VM aktif.
+Bagian ini hanya dilakukan apabila diperlukan untuk failover aktual.
 
-Urutan:
+## Step 1 — Pastikan Production VM Tidak Aktif
+
+Sebelum VM DR masuk ke jaringan Production:
 
 ```text
-1. Pastikan VM Production tidak lagi aktif.
-2. Pastikan tidak ada VM lain menggunakan IP produksi.
-3. Pastikan VM DR sudah lulus health check.
-4. Siapkan perubahan network dari isolated DR ke network aktif.
-5. Pastikan konfigurasi IP tetap menggunakan IP produksi.
-6. Aktifkan konektivitas produksi.
-7. Lakukan ping.
-8. Lakukan SSH.
-9. Lakukan HTTP/HTTPS.
-10. Lakukan verifikasi aplikasi.
+VM Production 192.168.71.233
 ```
 
-> **PENTING:** Jangan mengaktifkan VM DR pada jaringan produksi sementara VM produksi dengan IP yang sama masih aktif.
+harus sudah dihentikan atau tidak lagi menggunakan jaringan Production.
 
----
+> **Jangan pernah mengaktifkan dua VM dengan IP `192.168.71.233` pada jaringan Production secara bersamaan.**
 
-# 16. Akses Setelah Failover
+## Step 2 — Pindahkan Network VM DR ke `vmbr0`
 
-Setelah VM DR dipromosikan:
+Setelah Production VM tidak aktif, ubah bridge VM DR dari:
 
 ```text
-Client
-  |
-  v
-Network Production
-  |
-  v
-VM DR
-192.168.71.233
+vmbr-dr
 ```
 
-Lakukan pemeriksaan dari sisi client:
+menjadi:
 
-- Ping
-- SSH
-- HTTP/HTTPS
-- Aplikasi
-- Database
-- Service terkait
+```text
+vmbr0
+```
 
-Pastikan akses berasal dari jaringan produksi dan bukan lagi melalui jalur isolasi DR.
+Contoh:
+
+```bash
+qm set 117 --net0 virtio=<MAC_ADDRESS>,bridge=vmbr0,firewall=1
+```
+
+Jika diperlukan, restart VM agar perubahan network diterapkan.
+
+## Step 3 — Verifikasi dari Client Production
+
+Lakukan pemeriksaan dengan urutan:
+
+```text
+Ping
+  ↓
+SSH
+  ↓
+HTTP/HTTPS
+  ↓
+Application
+```
+
+Jika seluruh service normal, VM DR telah menjadi VM aktif.
 
 ---
 
-# 17. Rollback Pengujian
+# 8. Rollback Jika Testing Gagal
 
-Jika pengujian tidak sesuai harapan, VM DR tetap dipertahankan dalam kondisi isolated.
+Jika health check VM DR gagal, VM tetap menggunakan:
 
-Jangan menghubungkan VM DR ke jaringan produksi apabila:
+```text
+vmbr-dr
+```
+
+dan tetap isolated.
+
+Jangan pindahkan VM DR ke `vmbr0` jika:
 
 - service belum sehat
 - IP belum benar
 - aplikasi gagal
 - database gagal
 - network belum benar
-- VM produksi masih aktif
+- VM Production masih aktif
 
-Prinsip rollback:
-
-```text
-VM DR gagal
-     |
-     v
-Tetap isolated
-     |
-     v
-VM Production tetap menjadi VM aktif
-```
-
-Pada implementasi dengan mekanisme slot restore, VM lama dipertahankan sampai VM hasil restore benar-benar sehat.
+Jika pengujian tidak menggunakan failover, VM Production tetap menjadi VM aktif.
 
 ---
 
-# 18. Pengelolaan Slot Restore
-
-Implementasi DR menggunakan konsep VM hasil restore sebagai **slot DR**.
-
-Contoh:
-
-```text
-VMID 117
-ONEMDORAYA
-```
-
-Setelah restore dan health check berhasil, slot tersebut menjadi kandidat VM DR aktif.
-
-Konsep slot bertujuan untuk:
-
-- menghindari konflik VMID
-- memisahkan VM production dan VM DR
-- memudahkan pengujian berulang
-- memudahkan rollback
-- menjaga VM production tetap aman selama pengujian
-
----
-
-# 19. Form Pemeriksaan Restore
-
-Catat hasil setiap proses restore:
-
-```text
-Tanggal restore       :
-Jam restore           :
-VMID sumber           :
-VMID hasil restore    :
-Nama VM               :
-File backup           :
-Tanggal backup        :
-Storage target        :
-Bridge network        :
-IP VM                 :
-Status VM             :
-Ping                  :
-SSH                   :
-HTTP/HTTPS            :
-Service aplikasi      :
-Status health check   :
-Status DR             :
-Administrator         :
-```
-
----
-
-# 20. Kriteria Restore Berhasil
-
-Restore dinyatakan **BERHASIL** apabila:
-
-1. File backup dapat dibaca dari OMV.
-2. Restore selesai tanpa error.
-3. VM berhasil dibuat pada Proxmox DR.
-4. Disk VM berhasil ditempatkan pada storage DR.
-5. VM dapat melakukan boot.
-6. Network interface aktif.
-7. VM menggunakan `vmbr-dr` selama pengujian.
-8. IP VM sesuai dengan IP produksi.
-9. Ping berhasil.
-10. SSH berhasil.
-11. Service utama berjalan.
-12. HTTP/HTTPS berhasil apabila VM menyediakan layanan web.
-13. Tidak terjadi konflik dengan VM produksi.
-14. VM siap digunakan untuk proses failover apabila diperlukan.
-
----
-
-# 21. Alur Standar Implementasi
+# 9. Alur Lengkap Restore
 
 ```text
 START
   |
   v
-Backup tersedia di OMV
+Login Proxmox DR
   |
   v
-Mount NFS pada Proxmox DR
+Cek NFS /mnt/omv-backup
   |
   v
-Pilih backup yang akan direstore
+Cek /mnt/omv-backup/Regional
   |
   v
-Tentukan VMID restore
+Pilih backup
   |
   v
-Restore langsung dari OMV
+Tentukan VMID baru
+  |
+  v
+qmrestore
   |
   v
 Restore selesai?
   |
-  +---- NO ----> Investigasi error
+  +---- NO ----> Investigasi restore
   |
  YES
   |
   v
-Periksa konfigurasi VM
+Cek qm config
   |
   v
 Set network = vmbr-dr
   |
   v
-Boot VM
+Start VM
   |
   v
-Health Check
-  |
-  +---- FAIL ---> Tetap isolated / rollback
-  |
- PASS
+Cek route vmbr-dr
   |
   v
-VM READY FOR DR
+Ping
   |
-  +---- TEST DR ----> Tetap isolated
+  v
+ARP
   |
-  +---- FAILOVER ---> Pastikan Production VM OFF
+  v
+SSH
+  |
+  v
+HTTP/HTTPS
+  |
+  v
+Service aplikasi
+  |
+  v
+READY FOR DR
+  |
+  +---- TESTING ----> Tetap vmbr-dr
+  |
+  +---- FAILOVER ---> Production VM OFF
                           |
                           v
-                    Aktifkan network produksi
+                       vmbr0
                           |
                           v
-                    Verifikasi layanan
+                     Ping / SSH / HTTP
                           |
                           v
                          END
@@ -734,116 +664,89 @@ VM READY FOR DR
 
 ---
 
-# 22. Checklist Implementasi Restore
+# 10. Checklist Restore
 
-## Infrastruktur
+## Persiapan
 
-- [ ] Proxmox DR aktif
-- [ ] Storage `local-lvm` tersedia
-- [ ] NFS OMV dapat diakses
-- [ ] `/mnt/omv-backup` tersedia
-- [ ] `/mnt/omv-backup/Regional` dapat dibaca
-- [ ] Backup tersedia
+- [ ] Login ke Proxmox DR
+- [ ] NFS OMV ter-mount
+- [ ] `/mnt/omv-backup/Regional` dapat diakses
+- [ ] Backup yang benar tersedia
+- [ ] VMID target belum digunakan
 
 ## Restore
 
-- [ ] Backup yang benar dipilih
-- [ ] VMID target tidak konflik
-- [ ] Restore selesai
-- [ ] Disk tersedia
-- [ ] VM configuration tersedia
-- [ ] CPU sesuai kemampuan DR
+- [ ] `qmrestore` dijalankan
+- [ ] Restore selesai tanpa error
+- [ ] `qm config <VMID>` berhasil
+- [ ] Disk berada pada `local-lvm`
 - [ ] RAM sesuai kebutuhan
+- [ ] CPU sesuai kemampuan node DR
 
-## Network
+## Network Isolation
 
 - [ ] Network VM menggunakan `vmbr-dr`
-- [ ] IP VM sesuai IP produksi
-- [ ] Route `/32` menuju IP VM menggunakan `vmbr-dr`
-- [ ] Tidak ada konflik IP dengan production VM
+- [ ] IP VM tetap `192.168.71.233`
+- [ ] Route menuju VM menggunakan `vmbr-dr`
+- [ ] Tidak ada konflik dengan Production
 
 ## Health Check
 
 - [ ] VM running
 - [ ] Ping PASS
+- [ ] ARP PASS
 - [ ] SSH PASS
 - [ ] HTTP/HTTPS PASS
 - [ ] Service aplikasi PASS
-- [ ] Database PASS jika diperlukan
-- [ ] Health check keseluruhan PASS
+- [ ] Status READY FOR DR
 
 ## Failover
 
-- [ ] Production VM dihentikan terlebih dahulu
-- [ ] Tidak ada device/VM lain menggunakan IP produksi
-- [ ] VM DR siap
-- [ ] Network DR dipromosikan ke jaringan produksi
+- [ ] Production VM sudah OFF / tidak menggunakan jaringan Production
+- [ ] VM DR dipindahkan dari `vmbr-dr` ke `vmbr0`
 - [ ] Ping dari client PASS
 - [ ] SSH dari client PASS
-- [ ] Aplikasi dapat diakses
-- [ ] Status failover dicatat
+- [ ] HTTP/HTTPS PASS
+- [ ] Aplikasi PASS
+- [ ] Failover dinyatakan berhasil
 
 ---
 
-# 23. Prinsip Operasional
-
-### 1. Production tidak disentuh saat pengujian
-
-Pengujian dilakukan dengan VM DR dalam kondisi isolated.
-
-### 2. IP produksi tetap dipertahankan
-
-VM DR tidak membutuhkan IP sementara seperti `10.99.0.0/24`.
-
-### 3. Restore langsung dari OMV
-
-Tidak diperlukan copy manual backup ke `/var/lib/vz/dump`.
-
-### 4. Isolasi dilakukan sebelum VM aktif
-
-VM hasil restore harus menggunakan `vmbr-dr` selama proses validasi.
-
-### 5. Health check dilakukan sebelum failover
-
-VM tidak boleh dipromosikan hanya karena proses restore berhasil.
-
-### 6. Production dan DR tidak boleh aktif bersamaan pada IP yang sama
-
-Ini merupakan kontrol utama untuk mencegah konflik jaringan.
-
-### 7. VM hasil restore dipertahankan sampai validasi selesai
-
-VM production tidak dihapus atau digantikan sebelum VM DR dinyatakan sehat.
-
----
-
-# 24. Status Implementasi
-
-Implementasi berikut telah diuji:
+# 11. Parameter Implementasi Final
 
 ```text
-Backup OMV
-     ↓
-NFS Mount
-     ↓
-Restore langsung dari OMV
-     ↓
-VMID baru
-     ↓
-Storage local-lvm
-     ↓
-vmbr-dr
-     ↓
-IP produksi 192.168.71.233
-     ↓
-Boot VM
-     ↓
-Ping       PASS
-SSH        PASS
-HTTP       PASS
-Service    PASS
-     ↓
-READY FOR DR
+Proxmox Production : 192.168.71.202
+Proxmox DR         : 192.168.71.205
+OMV                : 192.168.71.211
+
+NFS Export         : /export/Backup_VM
+NFS Mount DR       : /mnt/omv-backup
+Backup Directory   : /mnt/omv-backup/Regional
+
+Production VMID    : 107
+DR VMID (contoh)   : 117
+
+Production IP      : 192.168.71.233
+Gateway            : 192.168.71.100
+
+Production Bridge  : vmbr0
+DR Bridge          : vmbr-dr
+DR Source IP       : 192.168.71.253
+
+Restore Storage    : local-lvm
 ```
 
-Standar ini dapat digunakan sebagai baseline implementasi restore Disaster Recovery untuk VM Proxmox yang menggunakan backup tersimpan di OMV.
+---
+
+# 12. Prinsip Wajib
+
+1. **Restore langsung dari backup OMV melalui NFS.**
+2. **Gunakan VMID baru untuk VM hasil restore.**
+3. **Jangan start VM DR pada `vmbr0` saat VM Production masih aktif.**
+4. **VM DR tetap menggunakan IP Production.**
+5. **Gunakan `vmbr-dr` selama proses restore dan testing.**
+6. **Pastikan route menuju IP DR menggunakan `vmbr-dr`.**
+7. **Lakukan health check sebelum failover.**
+8. **Untuk failover, pastikan VM Production sudah tidak aktif terlebih dahulu.**
+9. **Setelah failover, pindahkan network VM DR ke `vmbr0`.**
+10. **Verifikasi ulang akses dari client Production setelah failover.**
