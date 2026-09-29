@@ -204,7 +204,7 @@ nano /etc/fstab
 Tambahkan:
 
 ```text
-192.168.71.211:/export/Backup_VM /mnt/omv-backup nfs defaults,_netdev 0 0
+192.168.71.211:/export/Backup_VM /mnt/omv-backup nfs vers=3,rw,_netdev,x-systemd.automount,noauto 0 0
 ```
 
 Keterangan:
