@@ -255,7 +255,97 @@ Sebelum restore, seluruh kondisi berikut harus terpenuhi:
 [ ] File backup tersedia
 ```
 
-Jika seluruh pemeriksaan PASS, lanjut ke Step 1.
+Jika seluruh pemeriksaan PASS, Sekarang buat konfigurasi passwordless SSH key proxmox.
+
+# Panduan Konfigurasi Passwordless SSH Key Proxmox
+
+Panduan ini menjelaskan langkah-langkah untuk mengonfigurasi autentikasi SSH berbasis kunci (key-based authentication) tanpa _passphrase_ dari **Proxmox A** ke **Proxmox B**. Hal ini diperlukan untuk otomasi proses backup atau Disaster Recovery (DR).
+
+---
+
+## Detail Lingkungan
+
+- **Proxmox A (Production):** `192.168.71.202`
+- **Proxmox B (DR):** `192.168.71.205`
+
+---
+
+## Langkah 1: Pemeriksaan dan Pembuatan SSH Key di Proxmox A
+
+1. Akses **Proxmox A** (`192.168.71.202`) melalui terminal/SSH sebagai pengguna `root`.
+2. Cek apakah pengguna `root` sudah memiliki SSH key:
+
+   ```bash
+   ls -la /root/.ssh/
+   ```
+
+   Cari keberadaan berkas berikut:
+
+   - `id_ed25519` / `id_ed25519.pub` _(direkomendasikan)_
+   - `id_rsa` / `id_rsa.pub`
+
+### Kondisi A: Jika SSH Key (`id_ed25519`) Sudah Ada
+
+Jangan membuat kunci baru. Tampilkan public key menggunakan perintah:
+
+```bash
+cat /root/.ssh/id_ed25519.pub
+```
+
+### Kondisi B: Jika SSH Key Belum Ada
+
+Buat kunci SSH baru khusus untuk koneksi DR dengan menjalankan perintah:
+
+```bash
+ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519
+```
+
+Saat prompt berikut muncul:
+
+```text
+Enter passphrase (empty for no passphrase):
+```
+
+Tekan **Enter** (kosongkan).
+
+Kemudian saat konfirmasi muncul:
+
+```text
+Enter same passphrase again:
+```
+
+Tekan **Enter** kembali.
+
+> **Catatan:** SSH Key tanpa _passphrase_ diperlukan agar _script_ otomasi backup $\rightarrow$ DR dapat berjalan tanpa intervensi manual.
+
+---
+
+## Langkah 2: Menyalin Public Key dan Verifikasi Koneksi
+
+1. Dari **Proxmox A**, salin _public key_ ke **Proxmox B**:
+
+   ```bash
+   ssh-copy-id root@192.168.71.205
+   ```
+
+2. Masukkan password `root` dari Proxmox B (hanya dilakukan sekali untuk proses otorisasi awal).
+
+3. Setelah proses selesai, lakukan pengujian koneksi tanpa password:
+
+   ```bash
+   ssh root@192.168.71.205 'hostname && hostname -I'
+   ```
+
+### Output yang Diharapkan
+
+Sistem tidak boleh meminta password, dan akan langsung menampilkan informasi nama _host_ serta IP dari Proxmox B:
+
+```text
+mdoBackupGrd
+192.168.71.205 192.168.71.253
+```
+
+Jika SSH sudah di setting di proxmox production kita, lanjut ke Step 1.
 
 ---
 
